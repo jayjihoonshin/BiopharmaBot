@@ -3,7 +3,7 @@ name: BioPharmaBot RSS 뉴스 모니터링
 on:
   # 30분마다 자동 실행
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/5 * * * *"
 
   # 수동 실행 버튼 (테스트용)
   workflow_dispatch:
