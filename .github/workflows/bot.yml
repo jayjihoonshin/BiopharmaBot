@@ -8,6 +8,9 @@ on:
   # 수동 실행 버튼 (테스트용)
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
