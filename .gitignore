@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+seen_articles.json
+dart_seen_filings.json
+dart_corp_list.json
