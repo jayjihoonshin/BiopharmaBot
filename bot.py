@@ -113,10 +113,36 @@ def article_id(entry: dict) -> str:
 # ──────────────────────────────────────────────
 # RSS 수집 + 필터링
 # ──────────────────────────────────────────────
+def _normalize_title(title: str) -> set[str]:
+    """제목에서 핵심 단어만 추출 (소문자, 3글자 이상)"""
+    import re
+    words = re.findall(r'[a-z0-9]{3,}', title.lower())
+    return set(words)
+
+
+def _is_duplicate_title(new_title: str, existing_titles: list[str], threshold: float = 0.5) -> bool:
+    """기존 기사 제목들과 비교하여 유사도가 threshold 이상이면 중복 판정"""
+    new_words = _normalize_title(new_title)
+    if not new_words:
+        return False
+
+    for existing in existing_titles:
+        existing_words = _normalize_title(existing)
+        if not existing_words:
+            continue
+        # Jaccard 유사도: 교집합 / 합집합
+        overlap = len(new_words & existing_words)
+        total = len(new_words | existing_words)
+        if total > 0 and overlap / total >= threshold:
+            return True
+    return False
+
+
 def fetch_and_filter() -> list[dict]:
     """모든 피드에서 기사 수집 → 키워드 필터링 → 중복 제거"""
     seen = load_seen()
     new_articles = []
+    collected_titles = []  # 이번 실행에서 수집한 기사 제목 (교차 소스 중복 체크용)
 
     for feed_info in RSS_FEEDS:
         print(f"[RSS] Fetching: {feed_info['name']}")
@@ -129,28 +155,35 @@ def fetch_and_filter() -> list[dict]:
         for entry in feed.entries:
             aid = article_id(entry)
 
-            # 중복 스킵
+            # URL 기반 중복 스킵
             if aid in seen:
                 continue
 
+            title = entry.get("title", "")
+
+            # 제목 유사도 기반 교차 소스 중복 스킵
+            if _is_duplicate_title(title, collected_titles):
+                print(f"  → 중복 스킵: {title[:50]}...")
+                seen[aid] = datetime.now(timezone.utc).isoformat()
+                continue
+
             # 키워드 필터링 (title + summary/description)
-            text = (
-                entry.get("title", "") + " " + entry.get("summary", "")
-            ).lower()
+            text = (title + " " + entry.get("summary", "")).lower()
 
             if any(kw in text for kw in FILTER_KEYWORDS):
                 new_articles.append({
                     "id": aid,
-                    "title": entry.get("title", ""),
+                    "title": title,
                     "description": entry.get("summary", ""),
                     "link": entry.get("link", ""),
                     "source": feed_info["name"],
                     "published": entry.get("published", ""),
                 })
+                collected_titles.append(title)
                 seen[aid] = datetime.now(timezone.utc).isoformat()
 
     save_seen(seen)
-    print(f"[RSS] 신규 기사 {len(new_articles)}건 감지")
+    print(f"[RSS] 신규 기사 {len(new_articles)}건 감지 (중복 제거 후)")
     return new_articles
 
 
@@ -272,6 +305,7 @@ def send_telegram(article: dict, analysis: dict):
 
     message = (
         f"{emoji} <b>[{cat}]</b>  {rel_label}\n\n"
+        f"<b>{article['title']}</b>\n\n"
         f"{analysis['summary']}\n\n"
         f"📌 원문: {article['link']}"
     )
