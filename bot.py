@@ -25,8 +25,16 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 # ──────────────────────────────────────────────
 RSS_FEEDS = [
     {
-        "name": "GlobeNewswire Healthcare",
-        "url": "https://www.globenewswire.com/RSSFeed/subjectcode/14-Healthcare/feedTitle/GlobeNewswire%20-%20Healthcare",
+        "name": "GlobeNewswire Biotech",
+        "url": "https://www.globenewswire.com/RssFeed/industry/5011-Biotechnology/feedTitle/GlobeNewswire%20-%20Biotechnology",
+    },
+    {
+        "name": "GlobeNewswire Pharma",
+        "url": "https://www.globenewswire.com/RssFeed/industry/5013-Pharmaceuticals/feedTitle/GlobeNewswire%20-%20Pharmaceuticals",
+    },
+    {
+        "name": "GlobeNewswire Clinical",
+        "url": "https://www.globenewswire.com/RssFeed/subjectcode/90-Clinical%20Study/feedTitle/GlobeNewswire%20-%20Clinical%20Study",
     },
     {
         "name": "BioPharma Dive",
@@ -42,7 +50,7 @@ RSS_FEEDS = [
     },
     {
         "name": "PRNewswire Pharma",
-        "url": "https://www.prnewswire.com/rss/news-releases-list.rss",
+        "url": "https://www.prnewswire.com/rss/health-latest-news/pharmaceuticals-list.rss",
     },
 ]
 
