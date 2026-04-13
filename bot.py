@@ -312,8 +312,8 @@ def send_telegram(article: dict, analysis: dict):
     rel_label = RELEVANCE_LABEL.get(rel, "⚪ LOW")
 
     message = (
-        f"{emoji} <b>[{cat}]</b>  {rel_label}\n\n"
-        f"<b>{article['title']}</b>\n\n"
+        f"<b>{article['title']}</b>\n"
+        f"{emoji} {cat}  |  {rel_label}\n\n"
         f"{analysis['summary']}\n\n"
         f"📌 원문: {article['link']}"
     )
