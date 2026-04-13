@@ -274,7 +274,7 @@ def fetch_gmail_articles(seen: dict, collected_titles: list[str]) -> list[dict]:
     new_articles = []
 
     try:
-        # 최근 1시간 내 메일 검색 (여유있게)
+        # 최근 20분 내 메일 검색
         query = "newer_than:20m"
         results = service.users().messages().list(
             userId="me", q=query, maxResults=20
@@ -319,10 +319,25 @@ def fetch_gmail_articles(seen: dict, collected_titles: list[str]) -> list[dict]:
                 seen[f"gmail_{msg_id}"] = datetime.now(timezone.utc).isoformat()
                 continue
 
+            # SEC Filing Alert 감지 → 대상 filing만 EDGAR 원문 가져오기
+            description = body[:2000]
+            if _is_sec_alert(subject, sender):
+                company_name = _extract_company_from_sec_alert(subject)
+                filing_type = _extract_filing_type(body)
+                if company_name and _is_target_filing(filing_type):
+                    print(f"  → SEC alert 감지: {company_name} / {filing_type}")
+                    edgar_text = _fetch_edgar_filing(company_name, filing_type)
+                    if edgar_text:
+                        description = edgar_text
+                elif company_name:
+                    print(f"  → SEC alert 스킵 (비대상 filing): {company_name} / {filing_type}")
+                    seen[f"gmail_{msg_id}"] = datetime.now(timezone.utc).isoformat()
+                    continue
+
             new_articles.append({
                 "id": f"gmail_{msg_id}",
                 "title": subject,
-                "description": body[:2000],
+                "description": description,
                 "link": f"https://mail.google.com/mail/u/0/#inbox/{msg_id}",
                 "source": f"Gmail ({sender[:30]})",
                 "published": date,
@@ -336,6 +351,180 @@ def fetch_gmail_articles(seen: dict, collected_titles: list[str]) -> list[dict]:
         print(f"[Gmail 오류] {e}")
 
     return new_articles
+
+
+# ──────────────────────────────────────────────
+# SEC EDGAR 원문 가져오기
+# ──────────────────────────────────────────────
+SEC_HEADERS = {
+    "User-Agent": "BioPharmaBot jay.jihoonshin@gmail.com",
+    "Accept-Encoding": "gzip, deflate",
+}
+
+# 모니터링 대상 SEC filing 유형
+TARGET_FILING_TYPES = {
+    "8-K",      # 주요 이벤트 (임상, M&A, FDA, 기술이전 등)
+    "S-1",      # IPO 신고서
+    "F-1",      # 해외 기업 IPO
+    "SC 13D",   # 대량 지분 취득 (5%+, 경영 참여 의도)
+    "SC 13G",   # 대량 지분 취득 (5%+, 수동적 투자)
+    "13D",      # SC 13D 약칭
+    "13G",      # SC 13G 약칭
+}
+
+
+def _is_target_filing(filing_type: str) -> bool:
+    """모니터링 대상 filing 유형인지 확인"""
+    return filing_type.upper() in {ft.upper() for ft in TARGET_FILING_TYPES}
+
+
+def _is_sec_alert(subject: str, sender: str) -> bool:
+    """SEC Filing Alert 메일인지 판별"""
+    subject_lower = subject.lower()
+    sender_lower = sender.lower()
+    return (
+        "sec" in subject_lower and "filing" in subject_lower
+        or "sec" in subject_lower and "alert" in subject_lower
+        or "filed with the sec" in subject_lower
+        or "equisolve" in sender_lower
+        or "sec filing" in subject_lower
+        or "8-k" in subject_lower or "10-k" in subject_lower
+        or "10-q" in subject_lower or "13d" in subject_lower
+        or "s-1" in subject_lower
+    )
+
+
+def _extract_company_from_sec_alert(subject: str) -> str:
+    """SEC alert 메일 제목에서 기업명 추출"""
+    # "SEC Filing Alert for Evommune, Inc." → "Evommune, Inc."
+    patterns = [
+        r"(?:SEC\s*Filing\s*Alert\s*(?:for|:)\s*)(.+?)(?:\s*$)",
+        r"(?:Filing\s*Alert\s*(?:for|:)\s*)(.+?)(?:\s*$)",
+        r"^(.+?)\s*(?:has filed|filed|announces)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, subject, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    # 패턴 매칭 실패 시 제목 전체에서 "SEC Filing Alert" 제거
+    cleaned = re.sub(r"(?:SEC\s*)?Filing\s*Alert\s*(?:for|:)?\s*", "", subject, flags=re.IGNORECASE).strip()
+    return cleaned if cleaned else ""
+
+
+def _extract_filing_type(body: str) -> str:
+    """메일 본문에서 filing 유형 추출"""
+    patterns = ["8-K", "10-K", "10-Q", "S-1", "13D", "13G", "4", "SC 13D", "SC 13G",
+                "6-K", "20-F", "F-1", "424B"]
+    body_upper = body.upper()
+    for ft in patterns:
+        if ft.upper() in body_upper:
+            return ft
+    return "8-K"  # 기본값
+
+
+def _fetch_edgar_filing(company_name: str, filing_type: str) -> str:
+    """SEC EDGAR에서 기업의 최신 filing 원문을 가져와서 텍스트로 반환"""
+    try:
+        # 1) EDGAR Full-Text Search API로 최신 filing 찾기
+        search_url = "https://efts.sec.gov/LATEST/search-index"
+        params = {
+            "q": f'"{company_name}"',
+            "dateRange": "custom",
+            "startdt": (datetime.now(timezone.utc) - __import__('datetime').timedelta(days=3)).strftime("%Y-%m-%d"),
+            "enddt": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "forms": filing_type,
+        }
+
+        # EDGAR EFTS API 사용
+        search_resp = requests.get(
+            "https://efts.sec.gov/LATEST/search-index",
+            params=params,
+            headers=SEC_HEADERS,
+            timeout=10,
+        )
+
+        # 대안: Company Search API 사용
+        # 기업명으로 CIK 찾기
+        cik_resp = requests.get(
+            f"https://www.sec.gov/cgi-bin/browse-edgar",
+            params={
+                "company": company_name,
+                "CIK": "",
+                "type": filing_type,
+                "dateb": "",
+                "owner": "include",
+                "count": 5,
+                "search_text": "",
+                "action": "getcompany",
+                "output": "atom",
+            },
+            headers=SEC_HEADERS,
+            timeout=10,
+        )
+
+        if cik_resp.status_code != 200:
+            print(f"  → EDGAR 검색 실패: {cik_resp.status_code}")
+            return ""
+
+        # Atom XML에서 filing URL 추출
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(cik_resp.text)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+
+        entries = root.findall(".//atom:entry", ns)
+        if not entries:
+            print(f"  → EDGAR filing 없음: {company_name}")
+            return ""
+
+        # 최신 filing의 링크 가져오기
+        filing_link = None
+        for entry in entries[:3]:
+            link = entry.find("atom:link", ns)
+            if link is not None:
+                href = link.get("href", "")
+                if href:
+                    filing_link = href
+                    break
+
+        if not filing_link:
+            return ""
+
+        # 2) Filing index 페이지에서 실제 문서 URL 찾기
+        print(f"  → EDGAR filing 발견: {filing_link}")
+        idx_resp = requests.get(
+            filing_link,
+            headers=SEC_HEADERS,
+            timeout=10,
+        )
+
+        if idx_resp.status_code != 200:
+            return ""
+
+        # HTML에서 filing document 링크 추출
+        doc_urls = re.findall(r'href="(/Archives/edgar/data/[^"]+\.htm)"', idx_resp.text)
+        if not doc_urls:
+            doc_urls = re.findall(r'href="(/Archives/edgar/data/[^"]+\.txt)"', idx_resp.text)
+
+        if not doc_urls:
+            return ""
+
+        # 첫 번째 문서 (보통 8-K 본문) 가져오기
+        doc_url = f"https://www.sec.gov{doc_urls[0]}"
+        doc_resp = requests.get(doc_url, headers=SEC_HEADERS, timeout=15)
+
+        if doc_resp.status_code != 200:
+            return ""
+
+        # HTML 태그 제거
+        text = re.sub(r'<[^>]+>', ' ', doc_resp.text)
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        print(f"  → EDGAR 원문 {len(text)}자 추출")
+        return text[:4000]  # Claude 입력 제한 고려
+
+    except Exception as e:
+        print(f"  → EDGAR 조회 오류: {e}")
+        return ""
 
 
 # ──────────────────────────────────────────────
