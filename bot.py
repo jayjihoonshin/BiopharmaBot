@@ -275,7 +275,7 @@ def fetch_gmail_articles(seen: dict, collected_titles: list[str]) -> list[dict]:
 
     try:
         # 최근 1시간 내 메일 검색 (여유있게)
-        query = "newer_than:1h"
+        query = "newer_than:20m"
         results = service.users().messages().list(
             userId="me", q=query, maxResults=20
         ).execute()
@@ -344,7 +344,7 @@ def fetch_gmail_articles(seen: dict, collected_titles: list[str]) -> list[dict]:
 SYSTEM_PROMPT = """너는 글로벌 바이오파마 뉴스 분석 봇이다. 입력된 영문 기사를 분석하여 아래 JSON 형식으로만 응답하라. JSON 외의 텍스트는 절대 포함하지 마라. 백틱이나 마크다운도 쓰지 마라.
 
 ## 출력 JSON 형식
-{"category": "카테고리명", "summary": "한국어 요약 텍스트", "relevance": "high/medium/low/none"}
+{"category": "카테고리명", "headline": "핵심 요약 제목 (한국어, 1줄)", "summary": "한국어 요약 텍스트", "relevance": "high/medium/low/none"}
 
 ## 카테고리 분류 기준 (6개 중 1개 선택)
 - "임상시험": Phase 1/2/3 결과, topline data, primary endpoint 달성/미달, 중간분석, 임상 중단
@@ -454,12 +454,27 @@ def send_telegram(article: dict, analysis: dict):
     rel = analysis.get("relevance", "medium")
     rel_label = RELEVANCE_LABEL.get(rel, "⚪ LOW")
 
+    # Gmail 소스면 Claude 생성 headline 사용, RSS면 원본 제목
+    is_gmail = article.get("source", "").startswith("Gmail")
+    title = analysis.get("headline", article["title"]) if is_gmail else article["title"]
+
     message = (
-        f"<b>{article['title']}</b>\n\n"
+        f"<b>{title}</b>\n\n"
         f"{emoji} {cat}  |  {rel_label}\n\n"
-        f"{analysis['summary']}\n\n"
-        f"📌 원문: {article['link']}"
+        f"{analysis['summary']}"
     )
+
+    if is_gmail:
+        # 메일 본문에서 링크 추출 (http/https)
+        urls = re.findall(r'https?://[^\s<>"\')\]]+', article.get("description", ""))
+        # 불필요한 링크 제외 (gmail, google, unsubscribe 등)
+        urls = [u for u in urls if not any(skip in u.lower() for skip in
+                ["google.com", "gmail.com", "unsubscribe", "mailto", "list-manage",
+                 "mailchimp", "click.notification", "tracking", "pixel"])]
+        if urls:
+            message += f"\n\n📌 원문: {urls[0]}"
+    else:
+        message += f"\n\n📌 원문: {article['link']}"
 
     try:
         resp = requests.post(
