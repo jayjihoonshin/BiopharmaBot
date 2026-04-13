@@ -26,7 +26,7 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 RSS_FEEDS = [
     {
         "name": "GlobeNewswire Healthcare",
-        "url": "https://www.globenewswire.com/RSSFeed/subjectcode/14-Healthcare/feedTitle/GlobeNewswire - Healthcare",
+        "url": "https://www.globenewswire.com/RSSFeed/subjectcode/14-Healthcare/feedTitle/GlobeNewswire%20-%20Healthcare",
     },
     {
         "name": "BioPharma Dive",
@@ -120,7 +120,11 @@ def fetch_and_filter() -> list[dict]:
 
     for feed_info in RSS_FEEDS:
         print(f"[RSS] Fetching: {feed_info['name']}")
-        feed = feedparser.parse(feed_info["url"])
+        try:
+            feed = feedparser.parse(feed_info["url"])
+        except Exception as e:
+            print(f"[RSS 오류] {feed_info['name']}: {e}")
+            continue
 
         for entry in feed.entries:
             aid = article_id(entry)
