@@ -4,3 +4,5 @@ __pycache__/
 seen_articles.json
 dart_seen_filings.json
 dart_corp_list.json
+credentials.json
+token.json

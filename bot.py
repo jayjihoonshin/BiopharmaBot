@@ -1,5 +1,6 @@
 """
 BioPharmaBot — 글로벌 바이오파마 뉴스 자동 수집·분류·요약·텔레그램 전송
+소스: RSS 피드 + Gmail 알림
 GitHub Actions cron으로 30분마다 실행
 """
 
@@ -7,8 +8,11 @@ import os
 import json
 import hashlib
 import time
+import re
+import base64
 from datetime import datetime, timezone
 from pathlib import Path
+from email.utils import parsedate_to_datetime
 
 import feedparser
 import requests
@@ -19,6 +23,8 @@ import requests
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+GMAIL_TOKEN = os.environ.get("GMAIL_TOKEN", "")
+GMAIL_CREDENTIALS = os.environ.get("GMAIL_CREDENTIALS", "")
 
 # ──────────────────────────────────────────────
 # RSS 피드 목록 (확장 시 여기에 추가)
@@ -192,6 +198,143 @@ def fetch_and_filter() -> list[dict]:
 
     save_seen(seen)
     print(f"[RSS] 신규 기사 {len(new_articles)}건 감지 (중복 제거 후)")
+    return new_articles, collected_titles
+
+
+# ──────────────────────────────────────────────
+# Gmail 수집
+# ──────────────────────────────────────────────
+def _get_gmail_service():
+    """Gmail API 서비스 객체 생성"""
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        if not GMAIL_TOKEN:
+            print("[Gmail] GMAIL_TOKEN이 설정되지 않았습니다.")
+            return None
+
+        # 환경변수에서 token.json, credentials.json 복원
+        token_data = json.loads(GMAIL_TOKEN)
+
+        # credentials.json에서 client_id, client_secret 가져오기
+        if GMAIL_CREDENTIALS:
+            cred_data = json.loads(GMAIL_CREDENTIALS)
+            installed = cred_data.get("installed", cred_data.get("web", {}))
+            token_data["client_id"] = installed.get("client_id", token_data.get("client_id"))
+            token_data["client_secret"] = installed.get("client_secret", token_data.get("client_secret"))
+
+        creds = Credentials.from_authorized_user_info(token_data)
+
+        # 토큰 만료 시 갱신
+        if creds.expired and creds.refresh_token:
+            from google.auth.transport.requests import Request
+            creds.refresh(Request())
+
+        return build("gmail", "v1", credentials=creds)
+
+    except Exception as e:
+        print(f"[Gmail 인증 오류] {e}")
+        return None
+
+
+def _extract_email_text(payload: dict) -> str:
+    """Gmail 메시지 payload에서 텍스트 추출"""
+    text = ""
+
+    if payload.get("mimeType", "").startswith("text/plain"):
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            text = base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+    elif payload.get("mimeType", "").startswith("text/html"):
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            html = base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+            # 간단한 HTML 태그 제거
+            text = re.sub(r'<[^>]+>', ' ', html)
+            text = re.sub(r'\s+', ' ', text).strip()
+
+    # 멀티파트인 경우 재귀
+    for part in payload.get("parts", []):
+        part_text = _extract_email_text(part)
+        if part_text:
+            text = part_text
+            if payload.get("mimeType", "") != "text/html":
+                break  # plain text 우선
+
+    return text[:3000]  # Claude 입력 제한 고려
+
+
+def fetch_gmail_articles(seen: dict, collected_titles: list[str]) -> list[dict]:
+    """Gmail에서 최근 30분 내 바이오파마 관련 메일 수집"""
+    service = _get_gmail_service()
+    if not service:
+        return []
+
+    new_articles = []
+
+    try:
+        # 최근 1시간 내 메일 검색 (여유있게)
+        query = "newer_than:1h"
+        results = service.users().messages().list(
+            userId="me", q=query, maxResults=20
+        ).execute()
+
+        messages = results.get("messages", [])
+        if not messages:
+            print("[Gmail] 최근 메일 없음")
+            return []
+
+        print(f"[Gmail] 최근 메일 {len(messages)}건 확인 중...")
+
+        for msg_info in messages:
+            msg_id = msg_info["id"]
+
+            # 중복 체크
+            if f"gmail_{msg_id}" in seen:
+                continue
+
+            # 메일 상세 조회
+            msg = service.users().messages().get(
+                userId="me", id=msg_id, format="full"
+            ).execute()
+
+            headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
+            subject = headers.get("Subject", "")
+            sender = headers.get("From", "")
+            date = headers.get("Date", "")
+
+            # 본문 추출
+            body = _extract_email_text(msg["payload"])
+
+            # 키워드 필터링 (RSS와 동일한 키워드)
+            text = (subject + " " + body).lower()
+            if not any(kw in text for kw in FILTER_KEYWORDS):
+                seen[f"gmail_{msg_id}"] = datetime.now(timezone.utc).isoformat()
+                continue
+
+            # 제목 유사도 기반 중복 체크 (RSS 기사와도 비교)
+            if _is_duplicate_title(subject, collected_titles):
+                print(f"  → Gmail 중복 스킵: {subject[:50]}...")
+                seen[f"gmail_{msg_id}"] = datetime.now(timezone.utc).isoformat()
+                continue
+
+            new_articles.append({
+                "id": f"gmail_{msg_id}",
+                "title": subject,
+                "description": body[:2000],
+                "link": f"https://mail.google.com/mail/u/0/#inbox/{msg_id}",
+                "source": f"Gmail ({sender[:30]})",
+                "published": date,
+            })
+            collected_titles.append(subject)
+            seen[f"gmail_{msg_id}"] = datetime.now(timezone.utc).isoformat()
+
+        print(f"[Gmail] 신규 {len(new_articles)}건 감지 (키워드+중복 필터 후)")
+
+    except Exception as e:
+        print(f"[Gmail 오류] {e}")
+
     return new_articles
 
 
@@ -312,7 +455,7 @@ def send_telegram(article: dict, analysis: dict):
     rel_label = RELEVANCE_LABEL.get(rel, "⚪ LOW")
 
     message = (
-        f"<b>{article['title']}</b>\n"
+        f"<b>{article['title']}</b>\n\n"
         f"{emoji} {cat}  |  {rel_label}\n\n"
         f"{analysis['summary']}\n\n"
         f"📌 원문: {article['link']}"
@@ -344,12 +487,21 @@ def main():
     print(f"{'='*60}")
 
     # 1) RSS 수집 + 필터링
-    articles = fetch_and_filter()
+    rss_articles, collected_titles = fetch_and_filter()
 
-    if articles:
-        # 2) 각 기사에 대해 Claude 분석 + 텔레그램 전송
-        for i, article in enumerate(articles):
-            print(f"\n[{i+1}/{len(articles)}] 분석 중: {article['title'][:60]}...")
+    # 2) Gmail 수집 + 필터링 (RSS와 중복 제거 공유)
+    seen = load_seen()
+    gmail_articles = fetch_gmail_articles(seen, collected_titles)
+    save_seen(seen)
+
+    # 3) 합치기
+    all_articles = rss_articles + gmail_articles
+
+    if all_articles:
+        # 4) 각 기사에 대해 Claude 분석 + 텔레그램 전송
+        for i, article in enumerate(all_articles):
+            source_tag = "📧" if article["source"].startswith("Gmail") else "📡"
+            print(f"\n{source_tag} [{i+1}/{len(all_articles)}] 분석 중: {article['title'][:60]}...")
 
             analysis = call_claude(article)
             if analysis is None:
@@ -365,15 +517,15 @@ def main():
             send_telegram(article, analysis)
 
             # API rate limit 방지 (기사 간 1초 간격)
-            if i < len(articles) - 1:
+            if i < len(all_articles) - 1:
                 time.sleep(1)
 
-        print(f"\n[RSS 완료] {len(articles)}건 처리")
+        print(f"\n[완료] RSS {len(rss_articles)}건 + Gmail {len(gmail_articles)}건 처리")
     else:
-        print("[RSS 완료] 신규 기사 없음")
+        print("[완료] 신규 기사 없음")
 
     print(f"\n{'='*60}")
-    print("[BioPharmaBot] RSS 실행 완료")
+    print("[BioPharmaBot] 실행 완료")
     print(f"{'='*60}")
 
 
